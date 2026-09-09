@@ -191,6 +191,19 @@ status table prints (`OK`/`FAILED` per user) before the concurrent message-sendi
 starts. Each user's token cache is independent, so a user you've already signed in on a
 previous run skips straight to a silent (no-prompt) token refresh.
 
+Once the message-sending phase starts, each user's session prints its own progress
+(`[user@contoso.com] Sending message 3/20...` / `... Received response for message 3/20
+in 4231ms`), interleaved across all concurrently-running users — this is just to
+confirm the run is progressing rather than hung, since a big pool can otherwise sit
+silent for a while.
+
+**Conversation model:** each user has **one ongoing conversation** for their whole
+session — `StartConversationAsync` runs once, then all of that user's
+`MessagesPerUser` prompts are sent as turns within that same conversation (like a real
+back-and-forth chat), not as separate one-off conversations. Concurrency comes from
+running multiple distinct users at once, each in their own conversation, not from
+restarting a fresh conversation per message.
+
 Configuration lives in `src/LoadTestDriver/appsettings.json` under `LoadTestSettings`:
 
 ```json

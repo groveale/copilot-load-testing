@@ -87,6 +87,8 @@ namespace CopilotStudioLoadTestDriver
                     double? firstActivityMs = null;
                     string lastMessageText = string.Empty;
 
+                    Console.WriteLine($"[{upn}] Starting conversation...");
+
                     await foreach (Activity act in copilotClient.StartConversationAsync(emitStartConversationEvent: true, cancellationToken: cancellationToken))
                     {
                         firstActivityMs ??= sw.Elapsed.TotalMilliseconds;
@@ -100,6 +102,8 @@ namespace CopilotStudioLoadTestDriver
                         }
                     }
 
+                    Console.WriteLine($"[{upn}] Conversation started ({conversationId}) in {sw.Elapsed.TotalMilliseconds:F0}ms");
+
                     results.Add(BuildResult(upn, 0, conversationId, sendUtc, userMessage: "(start conversation)", firstActivityMs, sw.Elapsed.TotalMilliseconds, lastMessageText, errorDetail: null));
 
                     for (int turn = 1; turn <= loadTestSettings.MessagesPerUser; turn++)
@@ -110,6 +114,8 @@ namespace CopilotStudioLoadTestDriver
                         firstActivityMs = null;
                         lastMessageText = string.Empty;
 
+                        Console.WriteLine($"[{upn}] Sending message {turn}/{loadTestSettings.MessagesPerUser}...");
+
                         await foreach (Activity act in copilotClient.AskQuestionAsync(prompt, null, cancellationToken))
                         {
                             firstActivityMs ??= sw.Elapsed.TotalMilliseconds;
@@ -119,12 +125,15 @@ namespace CopilotStudioLoadTestDriver
                             }
                         }
 
+                        Console.WriteLine($"[{upn}] Received response for message {turn}/{loadTestSettings.MessagesPerUser} in {sw.Elapsed.TotalMilliseconds:F0}ms");
+
                         results.Add(BuildResult(upn, turn, conversationId, sendUtc, userMessage: prompt, firstActivityMs, sw.Elapsed.TotalMilliseconds, lastMessageText, errorDetail: null));
                     }
                 }
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex, "User session {Upn} failed", upn);
+                    Console.WriteLine($"[{upn}] FAILED: {ex.Message}");
                     results.Add(new TurnResult
                     {
                         User = upn,
@@ -157,19 +166,37 @@ namespace CopilotStudioLoadTestDriver
 
         /// <summary>
         /// Classifies a completed turn as Answered/Refused based on the response text.
-        /// NOTE: this is a best-effort heuristic. Copilot Studio throttling/refusals can
-        /// arrive as an ordinary-looking successful activity whose body contains an error
-        /// code rather than an HTTP error status - inspect a real refusal in the output
-        /// CSV and tighten this check with the actual marker text/error code your agent
-        /// returns before relying on refusal counts at scale.
+        /// NOTE: this is a best-effort heuristic, kept deliberately narrow after an
+        /// earlier version (matching generic words like "error"/"try again" anywhere in
+        /// the text) produced false positives on long, legitimate answers that happened
+        /// to contain one of those words in passing (e.g. "if nothing arrives, try
+        /// again..."). Real Copilot Studio throttling/refusals reportedly come back as
+        /// SHORT, ordinary-looking successful activities carrying a specific error code
+        /// in the body rather than an HTTP error status - so this only flags short
+        /// responses containing one of a small set of specific throttle/limit phrases.
+        /// Inspect any "Refused" row's ResponseTextTruncated in the output CSV and tune
+        /// this further once you've seen your agent's actual refusal wording/error code.
         /// </summary>
+        private static readonly string[] RefusalPhrases =
+        [
+            "rate limit",
+            "too many requests",
+            "quota exceeded",
+            "quota has been exceeded",
+            "request limit",
+            "throttled",
+            "please try again in a few minutes",
+            "please try again later",
+        ];
+
         private static TurnResult BuildResult(string user, int turnIndex, string conversationId, DateTime sendUtc, string userMessage, double? firstActivityMs, double completeMs, string responseText, string? errorDetail)
         {
+            // Real refusals are reportedly short - requiring this alongside a specific
+            // phrase avoids flagging long legitimate answers that happen to mention one of
+            // these words/phrases in passing.
             bool looksRefused = !string.IsNullOrEmpty(responseText) &&
-                (responseText.Contains("error", StringComparison.OrdinalIgnoreCase) ||
-                 responseText.Contains("throttle", StringComparison.OrdinalIgnoreCase) ||
-                 responseText.Contains("quota", StringComparison.OrdinalIgnoreCase) ||
-                 responseText.Contains("try again", StringComparison.OrdinalIgnoreCase));
+                responseText.Length <= 300 &&
+                RefusalPhrases.Any(phrase => responseText.Contains(phrase, StringComparison.OrdinalIgnoreCase));
 
             return new TurnResult
             {

@@ -28,7 +28,7 @@ namespace CopilotStudioLoadTestDriver
         {
             string Escape(string s) => "\"" + s.Replace("\"", "\"\"").Replace("\r", " ").Replace("\n", " ") + "\"";
 
-            string truncatedResponse = ResponseText.Length > 200 ? ResponseText[..200] + "..." : ResponseText;
+            string truncatedResponse = ResponseText.Length > 500 ? ResponseText[..500] + "..." : ResponseText;
 
             return string.Join(',',
             [

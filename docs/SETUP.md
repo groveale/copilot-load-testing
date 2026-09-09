@@ -92,25 +92,17 @@ All connection details live in
 ```json
 {
   "CopilotStudioClientSettings": {
-    "EnvironmentId": "17689662-d743-eb91-9e33-25fe8d537f15",
+    "EnvironmentId": "17689662",
     "SchemaName": "cr1e9_Test1SharePointasAgentKnowledge",
-    "TenantId": "d8464949-bb1d-476f-bbe8-a46293833f6d",
-    "AppClientId": "97fc4309-90a1-463c-ab85-80a523ffe284",
+    "TenantId": "d8464949-bb1d-476f",
+    "AppClientId": "97fc4309-90a1",
     "AppClientSecret": "",
     "UseS2SConnection": false
   }
 }
 ```
-
-This has already been filled in with your agent/app registration values above. Leave
-`AppClientSecret` empty and `UseS2SConnection` as `false` — this sample uses interactive
-user auth (device/browser sign-in + cached token), not service-to-service auth (S2S isn't
-currently supported for Copilot Studio anyway).
-
-> If you ever need a *different* set of values (e.g. testing against another agent or app
-> registration) without touching this file, an `appsettings.Development.json` sitting next
-> to it will override the same keys and is a good place to keep anything you don't want
-> committed — it's already excluded via `.gitignore`.
+Leave `AppClientSecret` empty and `UseS2SConnection` as `false` — this sample uses interactive
+user auth (device/browser sign-in + cached token), not service-to-service auth.
 
 ---
 
@@ -259,7 +251,7 @@ latency) prints at the end of each run.
 
 ## 6. Next steps (beyond the multi-user pilot)
 
-- A pool of ~100–200 licensed test identities with pre-captured/cached tokens (device code
+- A pool of licensed test identities with pre-captured/cached tokens (device code
   flow works well here — no browser needed per identity after the first sign-in), so
   concurrency isn't bottlenecked by one identity/token.
 - Application Insights wired into the agent (Settings → Advanced → Application Insights) so

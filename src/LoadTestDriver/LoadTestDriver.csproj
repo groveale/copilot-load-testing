@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<RootNamespace>CopilotStudioLoadTestDriver</RootNamespace>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+		<PackageReference Include="Microsoft.Identity.Client.Extensions.Msal" Version="4.88.0" />
+		<PackageReference Include="Microsoft.Agents.CopilotStudio.Client" Version="1.8.*" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- Reuse the settings model from the smoke-test sample rather than duplicating it.
+		     Auth here is handled differently to the sample (single device-code sign-in
+		     shared across all concurrent conversations, rather than one interactive
+		     browser login per HTTP client) - see DeviceCodeTokenProvider.cs. -->
+		<Compile Include="..\CopilotStudioClientSample\SampleConnectionSettings.cs" Link="SampleConnectionSettings.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="appsettings.json">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
+	</ItemGroup>
+
+</Project>

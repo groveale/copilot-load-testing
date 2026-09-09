@@ -1,0 +1,14 @@
+# Build artifacts
+bin/
+obj/
+
+# Local token cache from MSAL (created at runtime next to the built exe)
+mcs_client_console/
+mcs_loadtest_cache/
+
+# Load test result CSVs (real test data, not source)
+output/
+
+# Settings files that may later hold real secrets (AppClientSecret, connection strings)
+appsettings.*.local.json
+*.user

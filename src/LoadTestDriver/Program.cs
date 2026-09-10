@@ -1,8 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+using System.Text;
 using CopilotStudioClientSample;
 using CopilotStudioLoadTestDriver;
+
+// Console output can include emoji/other characters outside the terminal's default
+// codepage (e.g. from agent responses containing emoji) - force UTF-8 so printing them
+// doesn't throw or mangle output.
+Console.OutputEncoding = Encoding.UTF8;
 
 HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 

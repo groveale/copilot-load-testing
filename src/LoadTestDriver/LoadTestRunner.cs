@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using CopilotStudioClientSample;
 using Microsoft.Agents.CopilotStudio.Client;
 using Microsoft.Extensions.Logging;
@@ -241,7 +242,10 @@ namespace CopilotStudioLoadTestDriver
             Directory.CreateDirectory(outputDir);
             string fileName = $"loadtest-results_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
             string path = Path.Combine(outputDir, fileName);
-            using StreamWriter writer = new(path, append: false);
+            // UTF8 (no BOM) explicitly - agent responses can contain emoji/other
+            // characters outside the system's default codepage, which would otherwise
+            // throw an EncoderFallbackException from the default StreamWriter encoding.
+            using StreamWriter writer = new(path, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
             writer.WriteLine(TurnResult.CsvHeader);
             foreach (TurnResult result in results.OrderBy(r => r.User).ThenBy(r => r.ConversationIndex).ThenBy(r => r.TurnIndex))
             {

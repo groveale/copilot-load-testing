@@ -148,13 +148,14 @@ and that the agent is reachable via DirectToEngine. That's the baseline before s
 
 ## 5. Running a load-test pilot
 
-`src/LoadTestDriver` is a separate console app that runs **one session per configured
-user**, each user sending its own sequence of messages, with multiple users' sessions
-running **concurrently with each other**. Within one user's own session, messages are
-sent sequentially (one turn at a time, waiting for each response) — that mirrors how a
-real person actually chats. Concurrency comes from running several distinct,
-separately-authenticated users at once, not from one identity firing many messages in
-parallel.
+`src/LoadTestDriver` is a separate console app that runs **one or more concurrent
+conversations per configured user** (see `ConcurrentConversationsPerUser` below), each
+sending its own sequence of messages, with multiple users' sessions also running
+**concurrently with each other**. Within a single conversation, messages are sent
+sequentially (one turn at a time, waiting for each response) — that mirrors how a real
+person actually chats. Concurrency comes from running several distinct,
+separately-authenticated users at once, and each of those users fanning out into
+several parallel conversations, not from one conversation firing many messages at once.
 
 ```powershell
 .\scripts\run-loadtest.ps1
@@ -183,18 +184,30 @@ status table prints (`OK`/`FAILED` per user) before the concurrent message-sendi
 starts. Each user's token cache is independent, so a user you've already signed in on a
 previous run skips straight to a silent (no-prompt) token refresh.
 
-Once the message-sending phase starts, each user's session prints its own progress
-(`[user@contoso.com] Sending message 3/20...` / `... Received response for message 3/20
-in 4231ms`), interleaved across all concurrently-running users — this is just to
-confirm the run is progressing rather than hung, since a big pool can otherwise sit
-silent for a while.
+Once the message-sending phase starts, each conversation prints its own progress
+(`[user@contoso.com#0] Sending message 3/20...` / `... Received response for message
+3/20 in 4231ms`), interleaved across all concurrently-running users/conversations —
+this is just to confirm the run is progressing rather than hung, since a big pool can
+otherwise sit silent for a while.
 
-**Conversation model:** each user has **one ongoing conversation** for their whole
-session — `StartConversationAsync` runs once, then all of that user's
+**Conversation model:** each conversation is **one ongoing chat** for its whole
+session — `StartConversationAsync` runs once, then all of that conversation's
 `MessagesPerUser` prompts are sent as turns within that same conversation (like a real
 back-and-forth chat), not as separate one-off conversations. Concurrency comes from
-running multiple distinct users at once, each in their own conversation, not from
+running multiple distinct users at once, and from each user's own
+`ConcurrentConversationsPerUser` conversations running in parallel — not from
 restarting a fresh conversation per message.
+
+**Scaling with `ConcurrentConversationsPerUser`:** to reach higher effective load
+without needing a proportionally larger pool of licensed test accounts, each signed-in
+user can fan out into several **parallel conversations**, all reusing that one user's
+single authenticated token (only the sign-in is per-user — spinning up more
+conversations doesn't need more accounts or more sign-ins). For example, 5 users x 5
+conversations each x 20 messages = 100 messages in flight from just 5 real identities.
+This isn't how a single real human uses the agent (nobody has 5 chats open at once) —
+it's a deliberate lever purely for generating load. Each individual conversation still
+sends its messages sequentially (one at a time, waiting for each response); only the
+conversations themselves run in parallel with each other.
 
 Configuration lives in `src/LoadTestDriver/appsettings.json` under `LoadTestSettings`:
 
@@ -205,6 +218,7 @@ Configuration lives in `src/LoadTestDriver/appsettings.json` under `LoadTestSett
     "user2@contoso.com"
   ],
   "MaxConcurrentUsers": 0,
+  "ConcurrentConversationsPerUser": 5,
   "MessagesPerUser": 20,
   "PromptBank": [
     "What is the best movie right now?",
@@ -221,8 +235,15 @@ Configuration lives in `src/LoadTestDriver/appsettings.json` under `LoadTestSett
 - **MaxConcurrentUsers** — caps how many users' sessions run at the same time; `0` means
   "all configured users run in parallel." Useful once `Users` grows larger than you want
   to run all-at-once (e.g. 50 users configured, only 10 running concurrently).
-- **MessagesPerUser** — how many messages each user sends, one at a time, within their
-  session (default 20).
+- **ConcurrentConversationsPerUser** — how many parallel conversations each signed-in
+  user spins up (default 1). This is your main lever for scaling total message volume
+  without growing the `Users` pool 1:1 — e.g. `Users` = 5, this = 5, `MessagesPerUser` =
+  20 → 500 total messages from 5 real identities. Console output labels each
+  conversation `[user@contoso.com#0]`, `[user@contoso.com#1]`, etc. so you can tell them
+  apart, and the output CSV has a matching `ConversationIndex` column.
+- **MessagesPerUser** — how many messages each conversation sends, one at a time, within
+  its own session (default 20). This applies per-conversation, so total messages for one
+  user = `ConcurrentConversationsPerUser` x `MessagesPerUser`.
 - **PromptBank** — a pool of prompts; each message picks one uniformly at random, so
   repeated turns aren't all identical. Keep prompts answerable from general knowledge if
   you want to isolate pure generative latency (no SharePoint/tool triggering).
@@ -236,11 +257,13 @@ a big run; consider signing accounts in over several sessions ahead of time, sin
 
 **Output:** `output/loadtest-results_<timestamp>.csv` at the **repo root** (not in `bin\`,
 so `dotnet clean`/rebuilds never wipe your results) — one row per turn, with `User`
-(the UPN), `ConversationId`, the `UserMessage` actually sent, client-observed
+(the UPN), `ConversationIndex` (which of that user's parallel conversations this row
+belongs to), `ConversationId`, the `UserMessage` actually sent, client-observed
 `FirstActivityMs`/`CompleteMs`, and a best-effort `Answered`/`Refused`/`Error`
-classification. The refusal heuristic just string-matches the response text for words
-like "error"/"throttle"/"quota" — **inspect a real refusal in the CSV and tighten this
-once you see your agent's actual error format**, since Copilot Studio throttling can
+classification. The refusal heuristic requires a short response containing a specific
+throttle-related phrase (see `RefusalPhrases` in `LoadTestRunner.cs`) — **inspect a real
+refusal in the CSV and tighten this further once you see your agent's actual error
+format**, since Copilot Studio throttling can
 arrive as an ordinary-looking successful activity whose body contains an error code
 rather than an HTTP error status. Client-side timing here is a quick sanity check
 only — cross-reference `ConversationId` against Application Insights/Copilot Studio

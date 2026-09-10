@@ -27,6 +27,21 @@ namespace CopilotStudioLoadTestDriver
         public int MaxConcurrentUsers { get; set; } = 0;
 
         /// <summary>
+        /// Number of separate, concurrent conversations each signed-in user spins up.
+        /// The user's ONE authenticated token is reused across all of them - only the
+        /// sign-in is per-user, conversations are just parallel uses of that same token.
+        /// This isn't how a real single human uses the agent (nobody has 5 chats going
+        /// at once), but it's a deliberate lever to multiply effective concurrency
+        /// without needing a proportionally larger pool of licensed test accounts: e.g.
+        /// 5 users x 5 conversations each x 20 messages = 100 messages in flight from
+        /// just 5 real identities. Within each conversation, messages are still sent
+        /// sequentially (one at a time, waiting for each response), matching a real
+        /// conversational back-and-forth - only the conversations themselves run in
+        /// parallel with each other.
+        /// </summary>
+        public int ConcurrentConversationsPerUser { get; set; } = 1;
+
+        /// <summary>
         /// Number of messages each user sends within their conversation.
         /// </summary>
         public int MessagesPerUser { get; set; } = 20;

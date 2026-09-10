@@ -10,6 +10,7 @@ namespace CopilotStudioLoadTestDriver
     internal record TurnResult
     {
         public required string User { get; init; }
+        public required int ConversationIndex { get; init; }
         public required int TurnIndex { get; init; }
         public string ConversationId { get; init; } = "(none)";
         public required DateTime SendUtc { get; init; }
@@ -33,6 +34,7 @@ namespace CopilotStudioLoadTestDriver
             return string.Join(',',
             [
                 Escape(User),
+                ConversationIndex.ToString(),
                 TurnIndex.ToString(),
                 Escape(ConversationId),
                 SendUtc.ToString("O"),
@@ -46,6 +48,6 @@ namespace CopilotStudioLoadTestDriver
         }
 
         public static string CsvHeader =>
-            "User,TurnIndex,ConversationId,SendUtc,UserMessage,FirstActivityMs,CompleteMs,Status,ResponseTextTruncated,ErrorDetail";
+            "User,ConversationIndex,TurnIndex,ConversationId,SendUtc,UserMessage,FirstActivityMs,CompleteMs,Status,ResponseTextTruncated,ErrorDetail";
     }
 }

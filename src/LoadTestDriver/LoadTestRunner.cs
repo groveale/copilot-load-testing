@@ -11,14 +11,17 @@ using Activity = Microsoft.Agents.Core.Models.Activity;
 namespace CopilotStudioLoadTestDriver
 {
     /// <summary>
-    /// Runs one session per configured user, each sending its own sequence of messages,
-    /// with multiple users' sessions running concurrently with each other.
+    /// Runs one session per configured user, each spinning up
+    /// <see cref="LoadTestSettings.ConcurrentConversationsPerUser"/> separate
+    /// conversations concurrently (all reusing that one user's single authenticated
+    /// token), with multiple users' sessions also running concurrently with each other.
     ///
-    /// Within a single user's session, messages are sent sequentially - one conversation
-    /// turn at a time, waiting for each response - which mirrors how a real person
-    /// actually chats rather than firing N messages from one identity simultaneously.
-    /// Concurrency comes from running several distinct, separately-authenticated users at
-    /// once, not from parallelising a single user's own messages.
+    /// Within a single conversation, messages are sent sequentially - one turn at a
+    /// time, waiting for each response - which mirrors how a real person actually chats.
+    /// Concurrency comes from (a) running several distinct, separately-authenticated
+    /// users at once, and (b) each of those users fanning out into several parallel
+    /// conversations on their one token - a deliberate lever to multiply effective load
+    /// without needing a proportionally larger pool of licensed test accounts.
     ///
     /// Client-side timings here (FirstActivityMs/CompleteMs) are a quick sanity check
     /// only; treat service-side telemetry (Application Insights / Copilot Studio
@@ -54,16 +57,19 @@ namespace CopilotStudioLoadTestDriver
             int maxConcurrentUsers = loadTestSettings.MaxConcurrentUsers > 0
                 ? Math.Min(loadTestSettings.MaxConcurrentUsers, readyUsers.Count)
                 : readyUsers.Count;
+            int conversationsPerUser = Math.Max(1, loadTestSettings.ConcurrentConversationsPerUser);
+            int totalConversations = readyUsers.Count * conversationsPerUser;
 
             logger.LogInformation(
-                "Starting load test: {UserCount} signed-in user(s), up to {MaxConcurrent} running in parallel, {MessagesPerUser} message(s) each",
-                readyUsers.Count, maxConcurrentUsers, loadTestSettings.MessagesPerUser);
+                "Starting load test: {UserCount} signed-in user(s), up to {MaxConcurrent} running in parallel, " +
+                "{ConversationsPerUser} concurrent conversation(s) per user ({TotalConversations} total), {MessagesPerUser} message(s) each",
+                readyUsers.Count, maxConcurrentUsers, conversationsPerUser, totalConversations, loadTestSettings.MessagesPerUser);
 
             var results = new ConcurrentBag<TurnResult>();
             using SemaphoreSlim gate = new(maxConcurrentUsers, maxConcurrentUsers);
 
             Stopwatch overallStopwatch = Stopwatch.StartNew();
-            IEnumerable<Task> tasks = readyUsers.Select(upn => RunUserSessionAsync(upn, gate, results, cancellationToken));
+            IEnumerable<Task> tasks = readyUsers.Select(upn => RunUserSessionAsync(upn, conversationsPerUser, gate, results, cancellationToken));
             await Task.WhenAll(tasks);
             overallStopwatch.Stop();
 
@@ -71,84 +77,99 @@ namespace CopilotStudioLoadTestDriver
             PrintSummary(results, overallStopwatch.Elapsed);
         }
 
-        private async Task RunUserSessionAsync(string upn, SemaphoreSlim gate, ConcurrentBag<TurnResult> results, CancellationToken cancellationToken)
+        /// <summary>
+        /// Runs all of one user's concurrent conversations. The user's own token is
+        /// acquired once per conversation's CopilotClient (all cheaply hitting the same
+        /// cached MSAL token via MultiUserAuthManager), then each conversation proceeds
+        /// independently and in parallel with the others for this same user.
+        /// </summary>
+        private async Task RunUserSessionAsync(string upn, int conversationsPerUser, SemaphoreSlim gate, ConcurrentBag<TurnResult> results, CancellationToken cancellationToken)
         {
             await gate.WaitAsync(cancellationToken);
             try
             {
-                ILogger<CopilotClient> clientLogger = loggerFactory.CreateLogger<CopilotClient>();
-                CopilotClient copilotClient = new(connectionSettings, httpClientFactory, clientLogger, upn);
+                IEnumerable<Task> conversationTasks = Enumerable.Range(0, conversationsPerUser)
+                    .Select(conversationIndex => RunSingleConversationAsync(upn, conversationIndex, results, cancellationToken));
+                await Task.WhenAll(conversationTasks);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
 
-                string conversationId = "(unknown)";
-                try
+        private async Task RunSingleConversationAsync(string upn, int conversationIndex, ConcurrentBag<TurnResult> results, CancellationToken cancellationToken)
+        {
+            string label = $"{upn}#{conversationIndex}";
+            ILogger<CopilotClient> clientLogger = loggerFactory.CreateLogger<CopilotClient>();
+            CopilotClient copilotClient = new(connectionSettings, httpClientFactory, clientLogger, upn);
+
+            string conversationId = "(unknown)";
+            try
+            {
+                DateTime sendUtc = DateTime.UtcNow;
+                Stopwatch sw = Stopwatch.StartNew();
+                double? firstActivityMs = null;
+                string lastMessageText = string.Empty;
+
+                Console.WriteLine($"[{label}] Starting conversation...");
+
+                await foreach (Activity act in copilotClient.StartConversationAsync(emitStartConversationEvent: true, cancellationToken: cancellationToken))
                 {
-                    DateTime sendUtc = DateTime.UtcNow;
-                    Stopwatch sw = Stopwatch.StartNew();
-                    double? firstActivityMs = null;
-                    string lastMessageText = string.Empty;
+                    firstActivityMs ??= sw.Elapsed.TotalMilliseconds;
+                    if (!string.IsNullOrEmpty(act.Conversation?.Id))
+                    {
+                        conversationId = act.Conversation.Id;
+                    }
+                    if (act.Type == "message" && !string.IsNullOrEmpty(act.Text))
+                    {
+                        lastMessageText = act.Text;
+                    }
+                }
 
-                    Console.WriteLine($"[{upn}] Starting conversation...");
+                Console.WriteLine($"[{label}] Conversation started ({conversationId}) in {sw.Elapsed.TotalMilliseconds:F0}ms");
 
-                    await foreach (Activity act in copilotClient.StartConversationAsync(emitStartConversationEvent: true, cancellationToken: cancellationToken))
+                results.Add(BuildResult(upn, conversationIndex, 0, conversationId, sendUtc, userMessage: "(start conversation)", firstActivityMs, sw.Elapsed.TotalMilliseconds, lastMessageText, errorDetail: null));
+
+                for (int turn = 1; turn <= loadTestSettings.MessagesPerUser; turn++)
+                {
+                    string prompt = PickPrompt();
+                    sendUtc = DateTime.UtcNow;
+                    sw.Restart();
+                    firstActivityMs = null;
+                    lastMessageText = string.Empty;
+
+                    Console.WriteLine($"[{label}] Sending message {turn}/{loadTestSettings.MessagesPerUser}...");
+
+                    await foreach (Activity act in copilotClient.AskQuestionAsync(prompt, null, cancellationToken))
                     {
                         firstActivityMs ??= sw.Elapsed.TotalMilliseconds;
-                        if (!string.IsNullOrEmpty(act.Conversation?.Id))
-                        {
-                            conversationId = act.Conversation.Id;
-                        }
                         if (act.Type == "message" && !string.IsNullOrEmpty(act.Text))
                         {
                             lastMessageText = act.Text;
                         }
                     }
 
-                    Console.WriteLine($"[{upn}] Conversation started ({conversationId}) in {sw.Elapsed.TotalMilliseconds:F0}ms");
+                    Console.WriteLine($"[{label}] Received response for message {turn}/{loadTestSettings.MessagesPerUser} in {sw.Elapsed.TotalMilliseconds:F0}ms");
 
-                    results.Add(BuildResult(upn, 0, conversationId, sendUtc, userMessage: "(start conversation)", firstActivityMs, sw.Elapsed.TotalMilliseconds, lastMessageText, errorDetail: null));
-
-                    for (int turn = 1; turn <= loadTestSettings.MessagesPerUser; turn++)
-                    {
-                        string prompt = PickPrompt();
-                        sendUtc = DateTime.UtcNow;
-                        sw.Restart();
-                        firstActivityMs = null;
-                        lastMessageText = string.Empty;
-
-                        Console.WriteLine($"[{upn}] Sending message {turn}/{loadTestSettings.MessagesPerUser}...");
-
-                        await foreach (Activity act in copilotClient.AskQuestionAsync(prompt, null, cancellationToken))
-                        {
-                            firstActivityMs ??= sw.Elapsed.TotalMilliseconds;
-                            if (act.Type == "message" && !string.IsNullOrEmpty(act.Text))
-                            {
-                                lastMessageText = act.Text;
-                            }
-                        }
-
-                        Console.WriteLine($"[{upn}] Received response for message {turn}/{loadTestSettings.MessagesPerUser} in {sw.Elapsed.TotalMilliseconds:F0}ms");
-
-                        results.Add(BuildResult(upn, turn, conversationId, sendUtc, userMessage: prompt, firstActivityMs, sw.Elapsed.TotalMilliseconds, lastMessageText, errorDetail: null));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "User session {Upn} failed", upn);
-                    Console.WriteLine($"[{upn}] FAILED: {ex.Message}");
-                    results.Add(new TurnResult
-                    {
-                        User = upn,
-                        TurnIndex = -1,
-                        ConversationId = conversationId,
-                        SendUtc = DateTime.UtcNow,
-                        UserMessage = loadTestSettings.TestPrompt,
-                        Status = "Error",
-                        ErrorDetail = ex.Message
-                    });
+                    results.Add(BuildResult(upn, conversationIndex, turn, conversationId, sendUtc, userMessage: prompt, firstActivityMs, sw.Elapsed.TotalMilliseconds, lastMessageText, errorDetail: null));
                 }
             }
-            finally
+            catch (Exception ex)
             {
-                gate.Release();
+                logger.LogWarning(ex, "Conversation {Label} failed", label);
+                Console.WriteLine($"[{label}] FAILED: {ex.Message}");
+                results.Add(new TurnResult
+                {
+                    User = upn,
+                    ConversationIndex = conversationIndex,
+                    TurnIndex = -1,
+                    ConversationId = conversationId,
+                    SendUtc = DateTime.UtcNow,
+                    UserMessage = loadTestSettings.TestPrompt,
+                    Status = "Error",
+                    ErrorDetail = ex.Message
+                });
             }
         }
 
@@ -189,7 +210,7 @@ namespace CopilotStudioLoadTestDriver
             "please try again later",
         ];
 
-        private static TurnResult BuildResult(string user, int turnIndex, string conversationId, DateTime sendUtc, string userMessage, double? firstActivityMs, double completeMs, string responseText, string? errorDetail)
+        private static TurnResult BuildResult(string user, int conversationIndex, int turnIndex, string conversationId, DateTime sendUtc, string userMessage, double? firstActivityMs, double completeMs, string responseText, string? errorDetail)
         {
             // Real refusals are reportedly short - requiring this alongside a specific
             // phrase avoids flagging long legitimate answers that happen to mention one of
@@ -201,6 +222,7 @@ namespace CopilotStudioLoadTestDriver
             return new TurnResult
             {
                 User = user,
+                ConversationIndex = conversationIndex,
                 TurnIndex = turnIndex,
                 ConversationId = conversationId,
                 SendUtc = sendUtc,
@@ -221,7 +243,7 @@ namespace CopilotStudioLoadTestDriver
             string path = Path.Combine(outputDir, fileName);
             using StreamWriter writer = new(path, append: false);
             writer.WriteLine(TurnResult.CsvHeader);
-            foreach (TurnResult result in results.OrderBy(r => r.User).ThenBy(r => r.TurnIndex))
+            foreach (TurnResult result in results.OrderBy(r => r.User).ThenBy(r => r.ConversationIndex).ThenBy(r => r.TurnIndex))
             {
                 writer.WriteLine(result.ToCsvRow());
             }
